@@ -1,26 +1,36 @@
 {
   "compilerOptions": {
-    "target": "es2020",
+    "target": "es2023",
+    "lib": ["es2023"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "esModuleInterop": true,
-    "types": [],
+    "types": ["node"],
+
     "outDir": "dist",
     "rootDir": "./src",
     "sourceMap": true,
-    "declaration": true,
-    "declarationMap": true,
-    "noUncheckedIndexedAccess": false,
+    "declaration": false,
+
     "strict": true,
-    "verbatimModuleSyntax": false,
+    // The flags `strict` leaves off that catch real bugs. `noUncheckedIndexedAccess`
+    // in particular is why `digest[offset]!` in totp.ts is written with an explicit
+    // assertion rather than silently being `number`.
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
     "isolatedModules": true,
+    "verbatimModuleSyntax": false,
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "skipLibCheck": true,
-    "paths": {
-      "@/*": ["./src/*"]
-    }
+    "resolveJsonModule": true
   },
   "include": ["src"],
-  "exclude": ["node_modules", "dist", "tests"]
+  "exclude": ["node_modules", "dist", "tests", "src/generated"]
 }
