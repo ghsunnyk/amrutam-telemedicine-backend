@@ -1,3 +1,4 @@
+import { env } from '../../config/env'
 import type { PrismaClient } from '../../generated/prisma/client'
 import { createLogger } from '../../observability/logger'
 import { InternalError } from '../errors'
@@ -14,23 +15,9 @@ import {
   unwrapDataKey,
   wrapDataKey,
 } from './encryption'
-import { env } from '../../config/env'
 
 const log = createLogger('keyring')
 
-/**
- * Holds the unwrapped DEKs in memory and hands them to callers that need to
- * encrypt or decrypt a column.
- *
- * Design notes:
- *  - Unwrapped keys are cached for the process lifetime. Re-reading + unwrapping on
- *    every field access would put a KMS call on the hot path of every consultation read.
- *  - Only one key is ACTIVE at a time; it is the one new writes use. RETIRED and
- *    COMPROMISED keys stay loaded so old rows still decrypt while the re-encryption
- *    job works through them.
- *  - `rotate()` is safe to call concurrently: the unique constraint on `version`
- *    means exactly one caller wins and the loser simply reloads.
- */
 export class Keyring {
   private keys = new Map<number, DataKey>()
   private activeVersion: number | null = null
@@ -38,7 +25,6 @@ export class Keyring {
 
   constructor(private readonly prisma: PrismaClient) {}
 
-  /** Called once at boot. Bootstraps the very first DEK on an empty database. */
   async load(): Promise<void> {
     const rows = await this.prisma.encryptionKey.findMany({ orderBy: { version: 'asc' } })
 
@@ -56,7 +42,6 @@ export class Keyring {
           key: unwrapDataKey(fromDbBytes(row.wrappedDek)),
         })
       } catch (cause) {
-        // Almost always "the KEK in env is not the KEK that wrapped this row".
         throw new InternalError(
           `Cannot unwrap data key v${row.version} — is ENCRYPTION_KEK correct for kek_id '${row.kekId}'?`,
           cause
@@ -64,7 +49,7 @@ export class Keyring {
       }
     }
 
-    const active = rows.filter((r) => r.status === 'ACTIVE')
+    const active = rows.filter(r => r.status === 'ACTIVE')
     if (active.length === 0) throw new InternalError('No ACTIVE encryption key; refusing to start')
     if (active.length > 1) {
       throw new InternalError(
@@ -74,10 +59,9 @@ export class Keyring {
 
     this.activeVersion = active[0]!.version
     this.loaded = true
-    log.info({ versions: rows.map((r) => r.version), active: this.activeVersion }, 'Keyring loaded')
+    log.info({ versions: rows.map(r => r.version), active: this.activeVersion }, 'Keyring loaded')
   }
 
-  /** The key new ciphertext is written under. */
   private active(): DataKey {
     if (!this.loaded || this.activeVersion === null) throw new InternalError('Keyring not loaded')
     const key = this.keys.get(this.activeVersion)
@@ -88,17 +72,17 @@ export class Keyring {
   private forVersion(version: number): DataKey {
     const key = this.keys.get(version)
     if (!key) {
-      throw new InternalError(`Ciphertext references unknown key version ${version}; cannot decrypt`)
+      throw new InternalError(
+        `Ciphertext references unknown key version ${version}; cannot decrypt`
+      )
     }
     return key
   }
 
-  /** Encrypt under the active key. `aad` binds the blob to its row + column. */
   encryptField(plaintext: string, aad?: string): DbBytes {
     return toDbBytes(encrypt(plaintext, this.active(), aad))
   }
 
-  /** Decrypt, selecting the key version recorded inside the blob itself. */
   decryptField(blob: Uint8Array, aad?: string): string {
     const buf = fromDbBytes(blob)
     return decryptToString(buf, this.forVersion(readKeyVersion(buf)), aad)
@@ -109,7 +93,6 @@ export class Keyring {
     return decrypt(buf, this.forVersion(readKeyVersion(buf)), aad)
   }
 
-  /** Optional-field convenience — most encrypted columns are nullable. */
   encryptOptional(plaintext: string | null | undefined, aad?: string): DbBytes | null {
     return plaintext == null || plaintext === '' ? null : this.encryptField(plaintext, aad)
   }
@@ -118,15 +101,10 @@ export class Keyring {
     return blob == null ? null : this.decryptField(blob, aad)
   }
 
-  /** True when a blob is not encrypted under the active key — the rotation job's filter. */
   needsReencryption(blob: Uint8Array): boolean {
     return readKeyVersion(fromDbBytes(blob)) !== this.activeVersion
   }
 
-  /**
-   * Mint a new DEK, mark it ACTIVE, retire the previous one. Old rows keep
-   * decrypting under the retired key until `jobs/reencrypt` has walked them.
-   */
   async rotate(): Promise<number> {
     const current = await this.prisma.encryptionKey.findFirst({
       where: { status: 'ACTIVE' },
@@ -134,7 +112,7 @@ export class Keyring {
     })
     const nextVersion = (current?.version ?? 0) + 1
 
-    await this.prisma.$transaction(async (tx) => {
+    await this.prisma.$transaction(async tx => {
       if (current) {
         await tx.encryptionKey.update({
           where: { id: current.id },
@@ -168,6 +146,5 @@ export class Keyring {
   }
 }
 
-/** Canonical AAD for a column, so a ciphertext cannot be moved between rows. */
 export const fieldAad = (model: string, id: string, column: string): string =>
   `${model}:${id}:${column}`

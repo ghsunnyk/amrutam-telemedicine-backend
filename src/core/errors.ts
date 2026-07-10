@@ -1,12 +1,3 @@
-/**
- * One error hierarchy for the whole app.
- *
- * The contract: anything thrown that is an `AppError` is a *known* failure and its
- * `message` is safe to show a caller. Anything else is a bug or an unexpected
- * dependency failure, and the error handler replaces its message with a generic
- * one. That single rule is what keeps stack traces and SQL errors out of responses.
- */
-
 export type ErrorCode =
   // 400s
   | 'VALIDATION_ERROR'
@@ -38,14 +29,14 @@ export abstract class AppError extends Error {
   abstract readonly status: number
   abstract readonly code: ErrorCode
 
-  /** Machine-readable extras merged into the response body. Must never carry PHI. */
   readonly details?: unknown
-  /** 5xx are logged at error level with a stack; 4xx at warn/info without one. */
   readonly isOperational = true
-  /** Hint for the caller (and our own retry middleware) that a retry may succeed. */
   readonly retryable: boolean
 
-  constructor(message: string, options?: { details?: unknown; cause?: unknown; retryable?: boolean }) {
+  constructor(
+    message: string,
+    options?: { details?: unknown; cause?: unknown; retryable?: boolean }
+  ) {
     super(message, { cause: options?.cause })
     this.name = new.target.name
     this.details = options?.details
@@ -71,10 +62,6 @@ export class UnauthenticatedError extends AppError {
   }
 }
 
-/**
- * Deliberately vague. Distinguishing "no such user" from "wrong password" turns
- * the login endpoint into an account-enumeration oracle.
- */
 export class InvalidCredentialsError extends AppError {
   readonly status = 401
   readonly code = 'INVALID_CREDENTIALS' as const
@@ -83,11 +70,6 @@ export class InvalidCredentialsError extends AppError {
   }
 }
 
-/**
- * A 401 that carries a payload the client must use to continue. The challenge token
- * proves the password leg already succeeded; it is short-lived and only accepted by
- * `POST /auth/mfa/challenge`.
- */
 export class MfaRequiredError extends AppError {
   readonly status = 401
   readonly code = 'MFA_REQUIRED' as const
@@ -99,7 +81,10 @@ export class MfaRequiredError extends AppError {
 export class ForbiddenError extends AppError {
   readonly status = 403
   readonly code: ErrorCode
-  constructor(message = 'You do not have permission to perform this action', code: ErrorCode = 'FORBIDDEN') {
+  constructor(
+    message = 'You do not have permission to perform this action',
+    code: ErrorCode = 'FORBIDDEN'
+  ) {
     super(message)
     this.code = code
   }
@@ -122,7 +107,6 @@ export class ConflictError extends AppError {
   }
 }
 
-/** Same Idempotency-Key, different request body. */
 export class IdempotencyKeyReusedError extends AppError {
   readonly status = 422
   readonly code = 'IDEMPOTENCY_KEY_REUSED' as const
@@ -131,7 +115,6 @@ export class IdempotencyKeyReusedError extends AppError {
   }
 }
 
-/** The original request holding this key is still running. Safe to retry shortly. */
 export class IdempotentRequestInProgressError extends AppError {
   readonly status = 409
   readonly code = 'IDEMPOTENT_REQUEST_IN_PROGRESS' as const
@@ -183,7 +166,10 @@ export class ServiceUnavailableError extends AppError {
 export class DependencyFailureError extends AppError {
   readonly status = 502
   readonly code = 'DEPENDENCY_FAILURE' as const
-  constructor(readonly dependency: string, cause?: unknown) {
+  constructor(
+    readonly dependency: string,
+    cause?: unknown
+  ) {
     super(`Upstream dependency '${dependency}' failed`, { cause, retryable: true })
   }
 }

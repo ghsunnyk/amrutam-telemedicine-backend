@@ -11,15 +11,6 @@ import { createLogger } from './observability/logger'
 
 const log = createLogger('container')
 
-/**
- * Dependency injection by explicit composition.
- *
- * No decorators, no reflect-metadata, no string tokens. Services take their
- * collaborators as constructor arguments and this function is the single place they
- * are wired together — so the dependency graph is a function you can read, the
- * compiler checks it, and a test can substitute any node by passing a different
- * object. A framework container buys nothing here except a runtime failure mode.
- */
 export interface Container {
   pool: Pool
   db: Db
@@ -33,7 +24,6 @@ export interface Container {
 }
 
 export interface ContainerOptions {
-  /** Override the connection string — integration tests point at a scratch database. */
   databaseUrl?: string
 }
 
@@ -43,13 +33,9 @@ export async function createContainer(options: ContainerOptions = {}): Promise<C
 
   const stopPoolObserver = observePool(pool)
 
-  // Order matters: the keyring reads (and on an empty database, bootstraps) the DEK
-  // before any service can encrypt a field. Failing here is fatal and should be —
-  // starting with a broken keyring means writing rows nobody can ever decrypt.
   const keyring = new Keyring(db)
   await keyring.load()
 
-  // Warms the dummy hash used to equalise login timing for unknown accounts.
   await initPasswordHasher()
 
   const audit = new AuditService(db)

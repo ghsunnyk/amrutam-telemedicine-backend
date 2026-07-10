@@ -16,14 +16,14 @@ import type { Role, User } from '../../generated/prisma/client'
 import { createLogger } from '../../observability/logger'
 import { authAttemptsTotal } from '../../observability/metrics'
 import { AuditAction, type AuditService } from '../audit/audit.service'
-import type { MfaService } from './mfa.service'
 import type {
   ChangePasswordInput,
   LoginInput,
   MfaChallengeInput,
   RegisterInput,
 } from './auth.schemas'
-import { type TokenService, type TokenPair } from './token.service'
+import type { MfaService } from './mfa.service'
+import { type TokenPair, type TokenService } from './token.service'
 
 const log = createLogger('auth')
 
@@ -48,7 +48,6 @@ export interface LoginResult {
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000
 
-/** Verification/reset tokens are high-entropy randoms, so SHA-256 suffices. */
 const hashOpaqueToken = (token: string) => createHash('sha256').update(token).digest('hex')
 
 export class AuthService {
@@ -60,23 +59,14 @@ export class AuthService {
     private readonly audit: AuditService
   ) {}
 
-  // -------------------------------------------------------------------------
-  // Registration
-  // -------------------------------------------------------------------------
-
-  /**
-   * Always creates a PATIENT. Role is never taken from the request body — see
-   * `registerSchema`, which is `.strict()` and has no `role` field.
-   *
-   * Returns the verification token so the caller can enqueue an email. It is never
-   * put in the HTTP response outside development.
-   */
-  async register(input: RegisterInput): Promise<{ user: AuthenticatedUser; verificationToken: string }> {
+  async register(
+    input: RegisterInput
+  ): Promise<{ user: AuthenticatedUser; verificationToken: string }> {
     const passwordHash = await hashPassword(input.password)
     const rawToken = randomBytes(32).toString('base64url')
 
     try {
-      const user = await this.db.$transaction(async (tx) => {
+      const user = await this.db.$transaction(async tx => {
         const created = await tx.user.create({
           data: {
             email: input.email,
@@ -129,11 +119,6 @@ export class AuthService {
     } catch (err) {
       if (isUniqueViolation(err, 'email')) {
         authAttemptsTotal.inc({ event: 'register', outcome: 'duplicate' })
-        // Account enumeration: an attacker learns this email is registered. The
-        // alternative — pretending to succeed and emailing "you already have an
-        // account" — is what a bank does. For a clinic, the usability cost of a
-        // silent no-op outweighs the (already public) fact of registration, so we
-        // are explicit, and we rate-limit registration hard instead.
         throw new ConflictError('An account with this email already exists')
       }
       if (isUniqueViolation(err, 'phone_hash')) {
@@ -143,19 +128,10 @@ export class AuthService {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Login
-  // -------------------------------------------------------------------------
-
-  /**
-   * Password login.
-   *
-   * Failure modes are deliberately indistinguishable to the caller: unknown email,
-   * wrong password and no-password-set all raise the same `InvalidCredentialsError`
-   * after the same argon2 cost (see `fakeVerify`). Only a *locked* account reveals
-   * more, because the user needs to know to wait.
-   */
-  async login(input: LoginInput, meta: RequestMeta): Promise<LoginResult | { mfaRequired: true; mfaToken: string }> {
+  async login(
+    input: LoginInput,
+    meta: RequestMeta
+  ): Promise<LoginResult | { mfaRequired: true; mfaToken: string }> {
     const user = await this.db.user.findFirst({
       where: { email: input.email, deletedAt: null },
     })
@@ -186,12 +162,8 @@ export class AuthService {
 
     this.assertUsableAccount(user)
 
-    // Correct password → the counter resets even if MFA later fails. MFA failures are
-    // counted separately; conflating them lets an attacker who knows the password
-    // lock out the victim by spamming bad TOTP codes.
     await this.clearFailedAttempts(user)
 
-    // Transparent hash upgrade when the cost parameters have been raised.
     if (needsRehash(user.passwordHash)) {
       const upgraded = await hashPassword(input.password)
       await this.db.user.update({ where: { id: user.id }, data: { passwordHash: upgraded } })
@@ -218,7 +190,6 @@ export class AuthService {
     return { tokens, user: toAuthenticatedUser(user) }
   }
 
-  /** Second leg of login: exchange the MFA challenge token + a code for a session. */
   async completeMfaChallenge(input: MfaChallengeInput, meta: RequestMeta): Promise<LoginResult> {
     const claims = this.tokens.verifyMfaChallengeToken(input.mfaToken)
 
@@ -236,9 +207,6 @@ export class AuthService {
       : await this.mfa.verifyChallenge(user.id, input.totpCode!)
 
     if (!ok) {
-      // MFA failures feed the same lockout counter as password failures. Someone
-      // holding a valid password and guessing 6-digit codes has 10^6 tries; five
-      // attempts and a 15-minute lock makes that a 3-year exercise.
       await this.registerFailedAttempt(user)
       authAttemptsTotal.inc({ event: 'mfa', outcome: 'failure' })
       await this.audit.recordDetached({
@@ -269,12 +237,11 @@ export class AuthService {
     return { tokens, user: toAuthenticatedUser(user) }
   }
 
-  // -------------------------------------------------------------------------
-  // Session lifecycle
-  // -------------------------------------------------------------------------
-
   async refresh(presentedToken: string, meta: RequestMeta): Promise<TokenPair> {
-    const { userId, familyId, newRefreshToken } = await this.tokens.rotateRefreshToken(presentedToken, meta)
+    const { userId, familyId, newRefreshToken } = await this.tokens.rotateRefreshToken(
+      presentedToken,
+      meta
+    )
 
     const user = await this.db.user.findFirst({ where: { id: userId, deletedAt: null } })
     if (!user) throw new UnauthenticatedError('Account no longer exists', 'TOKEN_INVALID')
@@ -287,7 +254,6 @@ export class AuthService {
         userId: user.id,
         role: user.role,
         sessionId: familyId,
-        // The session already cleared MFA when it was created; rotation inherits it.
         mfaSatisfied: user.mfaEnabled,
       }),
       refreshToken: newRefreshToken,
@@ -299,23 +265,27 @@ export class AuthService {
   async logout(refreshToken: string, userId?: string): Promise<void> {
     await this.tokens.revokeToken(refreshToken, 'LOGOUT')
     if (userId) {
-      await this.audit.recordDetached({ action: AuditAction.LOGOUT, resourceType: 'user', resourceId: userId })
+      await this.audit.recordDetached({
+        action: AuditAction.LOGOUT,
+        resourceType: 'user',
+        resourceId: userId,
+      })
     }
   }
 
   async logoutAll(userId: string): Promise<void> {
     await this.tokens.revokeAllForUser(userId, 'LOGOUT_ALL')
-    await this.audit.recordDetached({ action: AuditAction.LOGOUT_ALL, resourceType: 'user', resourceId: userId })
+    await this.audit.recordDetached({
+      action: AuditAction.LOGOUT_ALL,
+      resourceType: 'user',
+      resourceId: userId,
+    })
   }
 
-  // -------------------------------------------------------------------------
-  // Password management
-  // -------------------------------------------------------------------------
-
-  /** Changing a password kills every other session. That is the point of changing it. */
   async changePassword(userId: string, input: ChangePasswordInput): Promise<void> {
     const user = await this.db.user.findUnique({ where: { id: userId } })
-    if (!user?.passwordHash) throw new ForbiddenError('Password change is unavailable for this account')
+    if (!user?.passwordHash)
+      throw new ForbiddenError('Password change is unavailable for this account')
 
     if (!(await verifyPassword(input.currentPassword, user.passwordHash))) {
       throw new ForbiddenError('Current password is incorrect')
@@ -323,7 +293,7 @@ export class AuthService {
 
     const passwordHash = await hashPassword(input.newPassword)
 
-    await this.db.$transaction(async (tx) => {
+    await this.db.$transaction(async tx => {
       await tx.user.update({
         where: { id: userId },
         data: { passwordHash, tokensValidFrom: new Date() },
@@ -340,21 +310,16 @@ export class AuthService {
     })
   }
 
-  /**
-   * Returns the reset token, or null when the email is unknown.
-   *
-   * The *controller* answers 202 either way. Leaking "no such account" here would
-   * turn password reset into a free account-enumeration endpoint, which is the most
-   * commonly missed instance of the problem.
-   */
   async requestPasswordReset(email: string): Promise<string | null> {
-    const user = await this.db.user.findFirst({ where: { email, deletedAt: null }, select: { id: true } })
+    const user = await this.db.user.findFirst({
+      where: { email, deletedAt: null },
+      select: { id: true },
+    })
     if (!user) return null
 
     const rawToken = randomBytes(32).toString('base64url')
 
-    await this.db.$transaction(async (tx) => {
-      // Only the newest reset link should work.
+    await this.db.$transaction(async tx => {
       await tx.verificationToken.updateMany({
         where: { userId: user.id, purpose: 'PASSWORD_RESET', consumedAt: null },
         data: { consumedAt: new Date() },
@@ -382,27 +347,33 @@ export class AuthService {
     const tokenHash = hashOpaqueToken(token)
     const passwordHash = await hashPassword(newPassword)
 
-    await this.db.$transaction(async (tx) => {
+    await this.db.$transaction(async tx => {
       const record = await tx.verificationToken.findUnique({ where: { tokenHash } })
 
-      if (!record || record.purpose !== 'PASSWORD_RESET' || record.consumedAt || record.expiresAt <= new Date()) {
-        throw new UnauthenticatedError('Password reset link is invalid or has expired', 'TOKEN_INVALID')
+      if (
+        !record ||
+        record.purpose !== 'PASSWORD_RESET' ||
+        record.consumedAt ||
+        record.expiresAt <= new Date()
+      ) {
+        throw new UnauthenticatedError(
+          'Password reset link is invalid or has expired',
+          'TOKEN_INVALID'
+        )
       }
 
-      // Single-use under concurrency.
       const { count } = await tx.verificationToken.updateMany({
         where: { id: record.id, consumedAt: null },
         data: { consumedAt: new Date() },
       })
-      if (count !== 1) throw new UnauthenticatedError('Password reset link has already been used', 'TOKEN_INVALID')
+      if (count !== 1)
+        throw new UnauthenticatedError('Password reset link has already been used', 'TOKEN_INVALID')
 
       await tx.user.update({
         where: { id: record.userId },
         data: {
           passwordHash,
           tokensValidFrom: new Date(),
-          // Whoever locked the account out is no longer relevant; the owner proved
-          // control of the mailbox.
           failedLoginCount: 0,
           lockedUntil: null,
         },
@@ -420,30 +391,34 @@ export class AuthService {
     })
   }
 
-  // -------------------------------------------------------------------------
-  // Email verification
-  // -------------------------------------------------------------------------
-
   async verifyEmail(token: string): Promise<void> {
     const tokenHash = hashOpaqueToken(token)
 
-    await this.db.$transaction(async (tx) => {
+    await this.db.$transaction(async tx => {
       const record = await tx.verificationToken.findUnique({ where: { tokenHash } })
-      if (!record || record.purpose !== 'EMAIL_VERIFY' || record.consumedAt || record.expiresAt <= new Date()) {
-        throw new UnauthenticatedError('Verification link is invalid or has expired', 'TOKEN_INVALID')
+      if (
+        !record ||
+        record.purpose !== 'EMAIL_VERIFY' ||
+        record.consumedAt ||
+        record.expiresAt <= new Date()
+      ) {
+        throw new UnauthenticatedError(
+          'Verification link is invalid or has expired',
+          'TOKEN_INVALID'
+        )
       }
 
       const { count } = await tx.verificationToken.updateMany({
         where: { id: record.id, consumedAt: null },
         data: { consumedAt: new Date() },
       })
-      if (count !== 1) throw new UnauthenticatedError('Verification link has already been used', 'TOKEN_INVALID')
+      if (count !== 1)
+        throw new UnauthenticatedError('Verification link has already been used', 'TOKEN_INVALID')
 
       await tx.user.update({
         where: { id: record.userId },
         data: {
           emailVerifiedAt: new Date(),
-          // Don't resurrect a suspended account by verifying an old email link.
           status: 'ACTIVE',
         },
       })
@@ -456,16 +431,12 @@ export class AuthService {
     })
   }
 
-  // -------------------------------------------------------------------------
-  // Internals
-  // -------------------------------------------------------------------------
-
   private async issueSession(
     user: User,
     meta: RequestMeta,
     options: { mfaSatisfied?: boolean } = {}
   ): Promise<TokenPair> {
-    const { token, familyId } = await this.db.$transaction((tx) =>
+    const { token, familyId } = await this.db.$transaction(tx =>
       this.tokens.issueRefreshToken(tx, { userId: user.id, userAgent: meta.userAgent, ip: meta.ip })
     )
 
@@ -483,20 +454,12 @@ export class AuthService {
   }
 
   private assertUsableAccount(user: Pick<User, 'status'>): void {
-    if (user.status === 'SUSPENDED') throw new ForbiddenError('This account has been suspended', 'ACCOUNT_INACTIVE')
-    if (user.status === 'DEACTIVATED') throw new ForbiddenError('This account has been deactivated', 'ACCOUNT_INACTIVE')
-    // PENDING_VERIFICATION users may sign in; route guards restrict what they can do.
-    // Blocking login here would make "resend verification email" impossible.
+    if (user.status === 'SUSPENDED')
+      throw new ForbiddenError('This account has been suspended', 'ACCOUNT_INACTIVE')
+    if (user.status === 'DEACTIVATED')
+      throw new ForbiddenError('This account has been deactivated', 'ACCOUNT_INACTIVE')
   }
 
-  /**
-   * Increment the failure counter and lock the account once it crosses the threshold.
-   *
-   * The increment is done by the database (`{ increment: 1 }`) and we branch on the
-   * *returned* value, not on the count we read before verifying the password.
-   * Branching on the stale read lets two parallel guesses both observe `count = 4`,
-   * neither reach the threshold, and the lock never engage.
-   */
   private async registerFailedAttempt(user: Pick<User, 'id'>): Promise<void> {
     const { failedLoginCount } = await this.db.user.update({
       where: { id: user.id },
@@ -506,8 +469,6 @@ export class AuthService {
 
     if (failedLoginCount < env.MAX_FAILED_LOGINS) return
 
-    // Threshold crossed. Reset the counter as we lock, so the next window starts
-    // clean rather than locking again on the first attempt after expiry.
     await this.db.user.update({
       where: { id: user.id },
       data: {
@@ -518,8 +479,9 @@ export class AuthService {
     log.warn({ userId: user.id }, 'Account locked after repeated failed authentication')
   }
 
-  private async clearFailedAttempts(user: Pick<User, 'id' | 'failedLoginCount' | 'lockedUntil'>): Promise<void> {
-    // Skip the write on the common path: a clean account authenticating successfully.
+  private async clearFailedAttempts(
+    user: Pick<User, 'id' | 'failedLoginCount' | 'lockedUntil'>
+  ): Promise<void> {
     if (user.failedLoginCount === 0 && user.lockedUntil === null) return
 
     await this.db.user.update({
@@ -536,8 +498,6 @@ export class AuthService {
       resourceId: userId,
       actorId: userId,
       outcome: 'FAILURE',
-      // The email is the only way to investigate credential stuffing. It is already
-      // in the request; recording it does not increase exposure.
       metadata: { email },
     })
   }
@@ -551,11 +511,10 @@ const toAuthenticatedUser = (user: User): AuthenticatedUser => ({
   emailVerified: user.emailVerifiedAt !== null,
 })
 
-/** Prisma P2002 — unique constraint. `meta.target` names the column(s). */
 function isUniqueViolation(err: unknown, column: string): boolean {
   const e = err as { code?: string; meta?: { target?: string[] | string } }
   if (e?.code !== 'P2002') return false
   const target = e.meta?.target
   const columns = Array.isArray(target) ? target : [target ?? '']
-  return columns.some((c) => c?.includes(column))
+  return columns.some(c => c?.includes(column))
 }

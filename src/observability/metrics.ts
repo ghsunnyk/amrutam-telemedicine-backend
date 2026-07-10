@@ -1,14 +1,6 @@
 import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client'
 import { env } from '../config/env'
 
-/**
- * Prometheus metrics, scraped at GET /metrics.
- *
- * Cardinality rule: a label value must come from a bounded set the *server*
- * controls. `route` is the Express route pattern (`/consultations/:id`), never
- * `req.path` — otherwise every consultation id becomes its own time series and
- * the TSDB falls over. Same reason there is no `userId` label anywhere.
- */
 export const registry = new Registry()
 
 registry.setDefaultLabels({ service: env.OTEL_SERVICE_NAME, env: env.NODE_ENV })
@@ -17,14 +9,10 @@ if (env.METRICS_ENABLED) {
   collectDefaultMetrics({ register: registry, prefix: 'amrutam_' })
 }
 
-// --- RED: Rate, Errors, Duration -------------------------------------------
-
 export const httpRequestDuration = new Histogram({
   name: 'amrutam_http_request_duration_seconds',
   help: 'HTTP request latency',
   labelNames: ['method', 'route', 'status_code'] as const,
-  // Tuned around the SLO: p95 < 200ms reads, < 500ms writes. Dense buckets where
-  // the objectives sit so the quantile estimate near the threshold is trustworthy.
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1, 2.5, 5, 10],
   registers: [registry],
 })
@@ -50,8 +38,6 @@ export const httpErrorsTotal = new Counter({
   registers: [registry],
 })
 
-// --- Database ---------------------------------------------------------------
-
 export const dbQueryDuration = new Histogram({
   name: 'amrutam_db_query_duration_seconds',
   help: 'Prisma query latency by model and action',
@@ -74,8 +60,6 @@ export const dbTransactionRetries = new Counter({
   registers: [registry],
 })
 
-// --- Auth -------------------------------------------------------------------
-
 export const authAttemptsTotal = new Counter({
   name: 'amrutam_auth_attempts_total',
   help: 'Authentication attempts',
@@ -89,12 +73,10 @@ export const authTokenRefreshReuseTotal = new Counter({
   registers: [registry],
 })
 
-// --- Domain -----------------------------------------------------------------
-
 export const bookingAttemptsTotal = new Counter({
   name: 'amrutam_booking_attempts_total',
   help: 'Slot booking attempts',
-  labelNames: ['outcome'] as const, // held | booked | conflict | expired | cancelled
+  labelNames: ['outcome'] as const,
   registers: [registry],
 })
 
@@ -118,12 +100,10 @@ export const paymentsTotal = new Counter({
   registers: [registry],
 })
 
-// --- Platform ---------------------------------------------------------------
-
 export const idempotencyHitsTotal = new Counter({
   name: 'amrutam_idempotency_hits_total',
   help: 'Idempotent request outcomes',
-  labelNames: ['outcome'] as const, // miss | replay | in_progress | conflict
+  labelNames: ['outcome'] as const,
   registers: [registry],
 })
 
@@ -137,7 +117,7 @@ export const rateLimitRejectionsTotal = new Counter({
 export const jobsProcessedTotal = new Counter({
   name: 'amrutam_jobs_processed_total',
   help: 'Background jobs processed',
-  labelNames: ['type', 'outcome'] as const, // succeeded | failed | dead
+  labelNames: ['type', 'outcome'] as const,
   registers: [registry],
 })
 
@@ -156,10 +136,6 @@ export const jobQueueDepth = new Gauge({
   registers: [registry],
 })
 
-/**
- * Oldest unpublished outbox event. This is the single best early-warning signal
- * that the relay has stalled: it climbs long before anything user-visible breaks.
- */
 export const outboxLagSeconds = new Gauge({
   name: 'amrutam_outbox_lag_seconds',
   help: 'Age of the oldest pending outbox event',
@@ -176,6 +152,6 @@ export const outboxEventsTotal = new Counter({
 export const auditLogWritesTotal = new Counter({
   name: 'amrutam_audit_log_writes_total',
   help: 'Audit log writes',
-  labelNames: ['outcome'] as const, // written | failed
+  labelNames: ['outcome'] as const,
   registers: [registry],
 })

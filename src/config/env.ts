@@ -1,44 +1,45 @@
 import { config as loadDotenv } from 'dotenv'
 import { z } from 'zod'
 
-// Only load .env off disk outside production. In production the orchestrator
-// injects env vars from the secret store, and a stray .env would silently win.
 if (process.env.NODE_ENV !== 'production') {
   loadDotenv({ quiet: true })
 }
 
-/** Trailing `# comment` is legal in .env but dotenv keeps it for unquoted values. */
 const stripInlineComment = (v: unknown) =>
   typeof v === 'string' ? v.replace(/\s+#.*$/, '').trim() : v
 
 const int = (opts?: { min?: number; max?: number }) =>
-  z.preprocess(stripInlineComment, z.coerce.number().int().min(opts?.min ?? 0).max(opts?.max ?? Number.MAX_SAFE_INTEGER))
+  z.preprocess(
+    stripInlineComment,
+    z.coerce
+      .number()
+      .int()
+      .min(opts?.min ?? 0)
+      .max(opts?.max ?? Number.MAX_SAFE_INTEGER)
+  )
 
 const bool = z.preprocess(
-  (v) => (typeof v === 'string' ? stripInlineComment(v) === 'true' : v),
+  v => (typeof v === 'string' ? stripInlineComment(v) === 'true' : v),
   z.boolean()
 )
 
-/** A base64 secret that must decode to exactly `bytes` bytes. */
 const base64Key = (bytes: number) =>
-  z
-    .string()
-    .transform((v, ctx) => {
-      const buf = Buffer.from(v, 'base64')
-      if (buf.length !== bytes) {
-        ctx.addIssue({
-          code: 'custom',
-          message: `must be ${bytes} base64-encoded bytes, got ${buf.length}`,
-        })
-        return z.NEVER
-      }
-      return buf
-    })
+  z.string().transform((v, ctx) => {
+    const buf = Buffer.from(v, 'base64')
+    if (buf.length !== bytes) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `must be ${bytes} base64-encoded bytes, got ${buf.length}`,
+      })
+      return z.NEVER
+    }
+    return buf
+  })
 
-const csv = z.string().transform((v) =>
+const csv = z.string().transform(v =>
   v
     .split(',')
-    .map((s) => s.trim())
+    .map(s => s.trim())
     .filter(Boolean)
 )
 
@@ -46,7 +47,9 @@ const schema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     PORT: int({ min: 1, max: 65535 }).default(3000),
-    LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent']).default('info'),
+    LOG_LEVEL: z
+      .enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'])
+      .default('info'),
 
     DATABASE_URL: z.string().startsWith('postgres'),
     SHADOW_DATABASE_URL: z.string().startsWith('postgres').optional(),
@@ -74,7 +77,9 @@ const schema = z
 
     RATE_LIMIT_ENABLED: bool.default(true),
     RATE_LIMIT_GLOBAL_CAPACITY: int({ min: 1 }).default(300),
-    RATE_LIMIT_GLOBAL_REFILL_PER_SEC: z.preprocess(stripInlineComment, z.coerce.number().positive()).default(5),
+    RATE_LIMIT_GLOBAL_REFILL_PER_SEC: z
+      .preprocess(stripInlineComment, z.coerce.number().positive())
+      .default(5),
 
     IDEMPOTENCY_TTL_HOURS: int({ min: 1, max: 720 }).default(24),
 
@@ -100,20 +105,33 @@ const schema = z
     if (cfg.NODE_ENV !== 'production') return
 
     if (cfg.CORS_ORIGINS.includes('*')) {
-      ctx.addIssue({ code: 'custom', path: ['CORS_ORIGINS'], message: 'wildcard origin is forbidden in production' })
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CORS_ORIGINS'],
+        message: 'wildcard origin is forbidden in production',
+      })
     }
     if (cfg.JWT_ACCESS_SECRET.startsWith('CHANGE_ME')) {
-      ctx.addIssue({ code: 'custom', path: ['JWT_ACCESS_SECRET'], message: 'placeholder secret in production' })
+      ctx.addIssue({
+        code: 'custom',
+        path: ['JWT_ACCESS_SECRET'],
+        message: 'placeholder secret in production',
+      })
     }
     if (cfg.METRICS_ENABLED && !cfg.METRICS_AUTH_TOKEN) {
       ctx.addIssue({
         code: 'custom',
         path: ['METRICS_AUTH_TOKEN'],
-        message: 'required when METRICS_ENABLED in production — /metrics leaks cardinality and topology',
+        message:
+          'required when METRICS_ENABLED in production — /metrics leaks cardinality and topology',
       })
     }
-    if (cfg.CORS_ORIGINS.some((o) => o.startsWith('http://'))) {
-      ctx.addIssue({ code: 'custom', path: ['CORS_ORIGINS'], message: 'plaintext http origin in production' })
+    if (cfg.CORS_ORIGINS.some(o => o.startsWith('http://'))) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CORS_ORIGINS'],
+        message: 'plaintext http origin in production',
+      })
     }
   })
 
@@ -124,9 +142,8 @@ function loadEnv(): Env {
 
   if (!parsed.success) {
     const details = parsed.error.issues
-      .map((i) => `  • ${i.path.join('.') || '(root)'}: ${i.message}`)
+      .map(i => `  • ${i.path.join('.') || '(root)'}: ${i.message}`)
       .join('\n')
-    // Deliberately not the logger: config is what the logger is built from.
     console.error(`\nInvalid environment configuration:\n${details}\n`)
     process.exit(1)
   }

@@ -2,8 +2,6 @@ import type { Request, Response } from 'express'
 import { isProduction } from '../../config/env'
 import { UnauthenticatedError } from '../../core/errors'
 import { sendSuccess } from '../../core/http'
-import type { AuthService, RequestMeta } from './auth.service'
-import type { MfaService } from './mfa.service'
 import type {
   ChangePasswordInput,
   DisableMfaInput,
@@ -17,13 +15,9 @@ import type {
   ResetPasswordInput,
   VerifyEmailInput,
 } from './auth.schemas'
+import type { AuthService, RequestMeta } from './auth.service'
+import type { MfaService } from './mfa.service'
 
-/**
- * Controllers do three things and nothing else: pull already-validated input off the
- * request, call a service, shape the response. No business rules, no database access,
- * no error handling — errors propagate to `errorHandler`, which is the only place
- * that decides what a client is allowed to see.
- */
 export class AuthController {
   constructor(
     private readonly auth: AuthService,
@@ -34,28 +28,19 @@ export class AuthController {
     const input = req.body as RegisterInput
     const { user, verificationToken } = await this.auth.register(input)
 
-    // TODO(phase-2): enqueue `email.verification` on the outbox instead.
-    // Returning the token outside production is what makes the flow testable without
-    // a mail server; leaking it in production would let anyone verify anyone's email.
-    sendSuccess(
-      res,
-      { user, ...(isProduction ? {} : { verificationToken }) },
-      { status: 201 }
-    )
+    sendSuccess(res, { user, ...(isProduction ? {} : { verificationToken }) }, { status: 201 })
   }
 
-  /**
-   * Two possible successes: a session, or an MFA challenge. The challenge path throws
-   * `MfaRequiredError` from the service, so it surfaces as a 401 carrying `mfaToken`
-   * in `error.details` — a client that ignores the body still fails closed.
-   */
   login = async (req: Request, res: Response): Promise<void> => {
     const result = await this.auth.login(req.body as LoginInput, requestMeta(req))
     sendSuccess(res, result)
   }
 
   mfaChallenge = async (req: Request, res: Response): Promise<void> => {
-    const result = await this.auth.completeMfaChallenge(req.body as MfaChallengeInput, requestMeta(req))
+    const result = await this.auth.completeMfaChallenge(
+      req.body as MfaChallengeInput,
+      requestMeta(req)
+    )
     sendSuccess(res, result)
   }
 
@@ -86,22 +71,11 @@ export class AuthController {
     })
   }
 
-  // --- Password -------------------------------------------------------------
-
   changePassword = async (req: Request, res: Response): Promise<void> => {
     await this.auth.changePassword(requireAuth(req).userId, req.body as ChangePasswordInput)
-    // 204 with no body: every other session is now dead, including any the client
-    // might have been holding. It must re-authenticate.
     res.status(204).end()
   }
 
-  /**
-   * Always 202, whether or not the email exists.
-   *
-   * This endpoint is the most commonly overlooked account-enumeration oracle: a 404
-   * for unknown addresses lets anyone test whether a person is a patient here, which
-   * for a healthcare provider is itself sensitive information.
-   */
   requestPasswordReset = async (req: Request, res: Response): Promise<void> => {
     const { email } = req.body as RequestPasswordResetInput
     const token = await this.auth.requestPasswordReset(email)
@@ -128,12 +102,6 @@ export class AuthController {
     res.status(204).end()
   }
 
-  // --- MFA ------------------------------------------------------------------
-
-  /**
-   * Returns the shared secret and an `otpauth://` URI. The secret is shown exactly
-   * once; `mfaEnabled` stays false until `enrolMfa` proves the authenticator works.
-   */
   beginMfaEnrolment = async (req: Request, res: Response): Promise<void> => {
     const challenge = await this.mfa.beginEnrolment(requireAuth(req).userId)
     sendSuccess(res, challenge)
@@ -143,7 +111,6 @@ export class AuthController {
     const { totpCode } = req.body as EnrolMfaInput
     const { recoveryCodes } = await this.mfa.completeEnrolment(requireAuth(req).userId, totpCode)
 
-    // The only time these are ever readable. We store argon2 hashes.
     sendSuccess(res, {
       recoveryCodes,
       message: 'Store these codes somewhere safe. They will not be shown again.',
@@ -170,11 +137,6 @@ const requestMeta = (req: Request): RequestMeta => ({
   userAgent: req.get('user-agent'),
 })
 
-/**
- * Narrows `req.auth` from optional to defined. The `authenticate` middleware
- * guarantees it, but the type system does not know that — and an unguarded `!` is how
- * a route that forgot the middleware becomes an authorisation bypass instead of a crash.
- */
 function requireAuth(req: Request): NonNullable<Request['auth']> {
   if (!req.auth) throw new UnauthenticatedError()
   return req.auth

@@ -1,8 +1,18 @@
 import { env } from '../../config/env'
 import { type Keyring, fieldAad } from '../../core/crypto/keyring'
 import { hashPassword, verifyPassword } from '../../core/crypto/password'
-import { buildOtpAuthUrl, generateRecoveryCodes, generateSecret, verifyToken } from '../../core/crypto/totp'
-import { ConflictError, ForbiddenError, NotFoundError, UnauthenticatedError } from '../../core/errors'
+import {
+  buildOtpAuthUrl,
+  generateRecoveryCodes,
+  generateSecret,
+  verifyToken,
+} from '../../core/crypto/totp'
+import {
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  UnauthenticatedError,
+} from '../../core/errors'
 import type { Db } from '../../db/prisma'
 import { createLogger } from '../../observability/logger'
 import { AuditAction, type AuditService } from '../audit/audit.service'
@@ -18,14 +28,6 @@ export interface EnrolmentResult {
   recoveryCodes: string[]
 }
 
-/**
- * TOTP-based MFA.
- *
- * Enrolment is two-phase on purpose. `beginEnrolment` stores an encrypted secret but
- * leaves `mfaEnabled = false`; only `completeEnrolment`, which requires a code the
- * user's authenticator actually produced, flips the flag. Without that proof step a
- * user can lock themselves out by scanning a QR that never made it into their app.
- */
 export class MfaService {
   constructor(
     private readonly db: Db,
@@ -43,7 +45,6 @@ export class MfaService {
 
     const secret = generateSecret()
 
-    // Overwrites any previous unfinished enrolment — restarting is always allowed.
     await this.db.user.update({
       where: { id: userId },
       data: {
@@ -65,10 +66,6 @@ export class MfaService {
     }
   }
 
-  /**
-   * Prove possession of the secret, then enable MFA and hand back recovery codes.
-   * The codes are returned exactly once; we store only their argon2 hashes.
-   */
   async completeEnrolment(userId: string, totpCode: string): Promise<EnrolmentResult> {
     const user = await this.db.user.findUnique({
       where: { id: userId },
@@ -78,7 +75,10 @@ export class MfaService {
     if (user.mfaEnabled) throw new ConflictError('Multi-factor authentication is already enabled')
     if (!user.mfaSecretEnc) throw new ConflictError('Start MFA enrolment before confirming it')
 
-    const secret = this.keyring.decryptField(user.mfaSecretEnc, fieldAad('user', userId, 'mfa_secret'))
+    const secret = this.keyring.decryptField(
+      user.mfaSecretEnc,
+      fieldAad('user', userId, 'mfa_secret')
+    )
     const result = verifyToken(totpCode, secret, { window: env.MFA_WINDOW })
 
     if (!result.valid) {
@@ -93,17 +93,20 @@ export class MfaService {
     }
 
     const codes = generateRecoveryCodes()
-    const codeHashes = await Promise.all(codes.map((c) => hashPassword(c)))
+    const codeHashes = await Promise.all(codes.map(c => hashPassword(c)))
 
-    await this.db.$transaction(async (tx) => {
+    await this.db.$transaction(async tx => {
       await tx.user.update({
         where: { id: userId },
-        data: { mfaEnabled: true, mfaEnrolledAt: new Date(), mfaLastUsedStep: BigInt(result.step!) },
+        data: {
+          mfaEnabled: true,
+          mfaEnrolledAt: new Date(),
+          mfaLastUsedStep: BigInt(result.step!),
+        },
       })
-      // Replacing codes wholesale keeps "regenerate codes" and "enrol" on one path.
       await tx.mfaRecoveryCode.deleteMany({ where: { userId } })
       await tx.mfaRecoveryCode.createMany({
-        data: codeHashes.map((codeHash) => ({ userId, codeHash })),
+        data: codeHashes.map(codeHash => ({ userId, codeHash })),
       })
       await this.audit.record(tx, {
         action: AuditAction.MFA_ENABLED,
@@ -115,14 +118,6 @@ export class MfaService {
     return { recoveryCodes: codes }
   }
 
-  /**
-   * Verify a TOTP code during login.
-   *
-   * `mfaLastUsedStep` is advanced on every success, and `verifyToken` refuses any
-   * step at or below it. Without that, a code shoulder-surfed (or captured by a
-   * phishing proxy) stays usable for the remainder of its 30-second window plus the
-   * clock-skew tolerance on either side.
-   */
   async verifyChallenge(userId: string, code: string): Promise<boolean> {
     const user = await this.db.user.findUnique({
       where: { id: userId },
@@ -132,7 +127,10 @@ export class MfaService {
       throw new ConflictError('Multi-factor authentication is not enabled for this account')
     }
 
-    const secret = this.keyring.decryptField(user.mfaSecretEnc, fieldAad('user', userId, 'mfa_secret'))
+    const secret = this.keyring.decryptField(
+      user.mfaSecretEnc,
+      fieldAad('user', userId, 'mfa_secret')
+    )
     const result = verifyToken(code, secret, {
       window: env.MFA_WINDOW,
       lastUsedStep: user.mfaLastUsedStep === null ? null : Number(user.mfaLastUsedStep),
@@ -140,8 +138,6 @@ export class MfaService {
 
     if (!result.valid) return false
 
-    // Guarded write: if a concurrent login already advanced the step past ours, that
-    // request consumed this code and we must reject rather than accept the replay.
     const { count } = await this.db.user.updateMany({
       where: {
         id: userId,
@@ -158,13 +154,6 @@ export class MfaService {
     return true
   }
 
-  /**
-   * Redeem a single-use recovery code.
-   *
-   * The codes are argon2 hashes, so we cannot look one up by value — we must verify
-   * against each unused hash in turn. With ten codes that is bounded and fine; it is
-   * also why recovery-code endpoints sit behind a strict rate limit.
-   */
   async verifyRecoveryCode(userId: string, code: string): Promise<boolean> {
     const normalised = code.trim().toUpperCase()
 
@@ -176,7 +165,6 @@ export class MfaService {
     for (const candidate of candidates) {
       if (!(await verifyPassword(normalised, candidate.codeHash))) continue
 
-      // `usedAt: null` in the filter makes redemption single-use under concurrency.
       const { count } = await this.db.mfaRecoveryCode.updateMany({
         where: { id: candidate.id, usedAt: null },
         data: { usedAt: new Date() },
@@ -195,11 +183,6 @@ export class MfaService {
     return false
   }
 
-  /**
-   * Disabling MFA is a privilege escalation in reverse: it lowers the account's
-   * security. Re-authenticating with the password proves the session belongs to the
-   * human, not to someone who walked up to an unlocked laptop.
-   */
   async disable(userId: string, currentPassword: string): Promise<void> {
     const user = await this.db.user.findUnique({
       where: { id: userId },
@@ -211,7 +194,7 @@ export class MfaService {
       throw new ForbiddenError('Current password is incorrect')
     }
 
-    await this.db.$transaction(async (tx) => {
+    await this.db.$transaction(async tx => {
       await tx.user.update({
         where: { id: userId },
         data: { mfaEnabled: false, mfaSecretEnc: null, mfaEnrolledAt: null, mfaLastUsedStep: null },

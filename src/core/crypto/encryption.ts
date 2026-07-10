@@ -97,7 +97,6 @@ export function encrypt(plaintext: string | Buffer, dek: DataKey, aad?: string):
   return Buffer.concat([MAGIC, keyVer, iv, cipher.getAuthTag(), ciphertext])
 }
 
-/** Reads the key version out of a blob without decrypting — used by the rotation job. */
 export function readKeyVersion(blob: Buffer): number {
   assertEnvelope(blob)
   return blob.readUInt32BE(MAGIC_LEN)
@@ -122,7 +121,6 @@ export function decrypt(blob: Buffer, dek: DataKey, aad?: string): Buffer {
   try {
     return Buffer.concat([decipher.update(ciphertext), decipher.final()])
   } catch {
-    // Wrong key, wrong AAD, or tampered ciphertext — all indistinguishable, by design.
     throw new InternalError('Decryption failed: ciphertext failed authentication')
   }
 }
@@ -136,32 +134,18 @@ function assertEnvelope(blob: Buffer): void {
   }
 }
 
-/**
- * Blind index: deterministic HMAC that lets us do equality lookups
- * (`WHERE phone_hash = $1`) on a column whose plaintext we never store.
- *
- * It is deterministic, so it leaks equality — two users with the same phone share a
- * hash. That is exactly the property we need for a uniqueness constraint, and it is
- * why blind indexes are only used on identifiers, never on low-entropy attributes
- * like gender or diagnosis where a frequency analysis would be trivial.
- *
- * The pepper lives in env, not the database, so a dump of Postgres alone does not
- * let an attacker brute-force the (small) phone-number space.
- */
 export function blindIndex(value: string, domain: string): string {
   return createHmac('sha256', env.BLIND_INDEX_PEPPER)
     .update(domain)
-    .update('\x00') // domain separation: hmac("ab","c") !== hmac("a","bc")
+    .update('\x00')
     .update(normalise(value))
     .digest('hex')
 }
 
-/** Non-reversible, salted IP hash for audit logs — correlation without storing PII. */
 export function hashIp(ip: string): string {
   return createHmac('sha256', env.IP_HASH_SALT).update(ip).digest('hex').slice(0, 32)
 }
 
-/** Constant-time compare for hex/base64 digests of equal expected length. */
 export function safeEqual(a: string, b: string): boolean {
   const bufA = Buffer.from(a)
   const bufB = Buffer.from(b)

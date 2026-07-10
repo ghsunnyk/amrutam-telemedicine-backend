@@ -2,36 +2,23 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express'
 import { timingSafeEqual } from 'node:crypto'
 import { env } from '../config/env'
 import { logger } from '../observability/logger'
-import { httpRequestDuration, httpRequestsInFlight, httpRequestsTotal, registry } from '../observability/metrics'
+import {
+  httpRequestDuration,
+  httpRequestsInFlight,
+  httpRequestsTotal,
+  registry,
+} from '../observability/metrics'
 import { getContext } from '../observability/requestContext'
 
-/** Never log or count these — they are health probes and would drown the signal. */
 const QUIET_PATHS = new Set(['/health', '/health/live', '/health/ready', '/metrics'])
 
-/**
- * Resolve the *route pattern*, not the concrete path.
- *
- * `req.route.path` is only populated after routing, which is why this reads it at
- * response time. Falling back to `req.path` for unmatched requests would let an
- * attacker mint unbounded time series by hitting `/does-not-exist-<random>`, so
- * unmatched requests are bucketed under a single label.
- */
 function routeLabel(req: Request): string {
   const route = (req as Request & { route?: { path?: string } }).route?.path
   if (!route) return req.route ? req.path : '__unmatched__'
 
-  // `req.baseUrl` carries the mount prefix (`/api/v1/auth`), `route` the leaf (`/login`).
   return `${req.baseUrl}${route}`.replace(/\/$/, '') || '/'
 }
 
-/**
- * One access-log line and one metric observation per request, emitted on `finish`.
- *
- * `finish` fires when the response is handed to the kernel. `close` fires if the
- * client hung up first — we count those too, because a client that gives up at 30s is
- * exactly the request we most want in the latency histogram, and dropping it makes
- * p95 look healthy while users see timeouts.
- */
 export function httpObservability(): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
     if (QUIET_PATHS.has(req.path)) return next()
@@ -48,7 +35,6 @@ export function httpObservability(): RequestHandler {
       const labels = {
         method: req.method,
         route: routeLabel(req),
-        // A client-aborted request never got a status; 499 is nginx's convention.
         status_code: String(aborted ? 499 : res.statusCode),
       }
 
@@ -57,7 +43,13 @@ export function httpObservability(): RequestHandler {
       httpRequestsTotal.inc(labels)
 
       const ctx = getContext()
-      const level = aborted ? 'warn' : res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info'
+      const level = aborted
+        ? 'warn'
+        : res.statusCode >= 500
+          ? 'error'
+          : res.statusCode >= 400
+            ? 'warn'
+            : 'info'
 
       logger[level](
         {
@@ -81,15 +73,6 @@ export function httpObservability(): RequestHandler {
   }
 }
 
-/**
- * `GET /metrics`.
- *
- * Guarded by a bearer token in production (enforced by `env.ts`, which refuses to
- * start otherwise). An open metrics endpoint hands an attacker your route table, your
- * traffic volumes, your error rates and your deploy cadence — it is reconnaissance,
- * served as JSON. Compared with `timingSafeEqual` so the token cannot be recovered
- * byte-by-byte.
- */
 export function metricsHandler(): RequestHandler {
   return async (req: Request, res: Response) => {
     if (!env.METRICS_ENABLED) {

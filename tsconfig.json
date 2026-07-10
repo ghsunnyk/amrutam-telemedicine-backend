@@ -12,9 +12,6 @@
     "declaration": false,
 
     "strict": true,
-    // The flags `strict` leaves off that catch real bugs. `noUncheckedIndexedAccess`
-    // in particular is why `digest[offset]!` in totp.ts is written with an explicit
-    // assertion rather than silently being `number`.
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
