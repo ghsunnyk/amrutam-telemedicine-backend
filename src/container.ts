@@ -3,6 +3,8 @@ import { env } from './config/env'
 import { Keyring } from './core/crypto/keyring'
 import { initPasswordHasher } from './core/crypto/password'
 import { createPool, createPrismaClient, observePool, type Db } from './db/prisma'
+import { AnalyticsController } from './modules/analytics/analytics.controller'
+import { AnalyticsService } from './modules/analytics/analytics.service'
 import { AuditService } from './modules/audit/audit.service'
 import { AuthController } from './modules/auth/auth.controller'
 import { AuthService } from './modules/auth/auth.service'
@@ -16,6 +18,8 @@ import { DoctorController } from './modules/doctors/doctor.controller'
 import { DoctorService } from './modules/doctors/doctor.service'
 import { PaymentController } from './modules/payments/payment.controller'
 import { PaymentService } from './modules/payments/payment.service'
+import { PrescriptionController } from './modules/prescriptions/prescription.controller'
+import { PrescriptionService } from './modules/prescriptions/prescription.service'
 import { createLogger } from './observability/logger'
 import { createWorker, reschedule, scheduleRecurringJobs } from './workers'
 import type { JobQueue } from './workers/jobQueue'
@@ -39,6 +43,10 @@ export interface Container {
   paymentController: PaymentController
   consultations: ConsultationService
   consultationController: ConsultationController
+  prescriptions: PrescriptionService
+  prescriptionController: PrescriptionController
+  analytics: AnalyticsService
+  analyticsController: AnalyticsController
   worker: JobQueue | null
   shutdown: () => Promise<void>
 }
@@ -76,6 +84,12 @@ export async function createContainer(options: ContainerOptions = {}): Promise<C
   const consultations = new ConsultationService(db, keyring, audit, payments)
   const consultationController = new ConsultationController(consultations)
 
+  const prescriptions = new PrescriptionService(db, keyring, audit)
+  const prescriptionController = new PrescriptionController(prescriptions)
+
+  const analytics = new AnalyticsService(db)
+  const analyticsController = new AnalyticsController(analytics)
+
   if (worker) {
     worker.start()
     await scheduleRecurringJobs(worker)
@@ -107,6 +121,10 @@ export async function createContainer(options: ContainerOptions = {}): Promise<C
     paymentController,
     consultations,
     consultationController,
+    prescriptions,
+    prescriptionController,
+    analytics,
+    analyticsController,
     worker,
     shutdown,
   }

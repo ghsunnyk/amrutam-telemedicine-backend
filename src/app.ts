@@ -8,12 +8,13 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler'
 import { httpObservability, metricsHandler } from './middleware/httpObservability'
 import { policies, rateLimit } from './middleware/rateLimit'
 import { requestContext } from './middleware/requestContext'
+import { createAnalyticsRouter } from './modules/analytics/analytics.routes'
 import { createAuthRouter } from './modules/auth/auth.routes'
 import { createAvailabilityRouter } from './modules/availability/availability.routes'
 import { createConsultationRouter } from './modules/consultations/consultation.routes'
 import { createDoctorRouter } from './modules/doctors/doctor.route'
 import { createPaymentRouter } from './modules/payments/payment.routes'
-
+import { createPrescriptionRouter } from './modules/prescriptions/prescription.routes'
 import { createHealthRouter } from './routes/health'
 
 export function createApp(container: Container): Express {
@@ -80,6 +81,8 @@ export function createApp(container: Container): Express {
   app.use('/api/v1/consultations', createConsultationRouter(container))
   app.use('/api/v1/consultations', createConsultationRouter(container))
   app.use('/api/v1/consultations', createPaymentRouter(container))
+  app.use('/api/v1', createPrescriptionRouter(container))
+  app.use('/api/v1/admin/analytics', createAnalyticsRouter(container))
 
   app.get('/api/v1', (_req, res) => {
     res.json({ success: true, data: { name: 'Amrutam Telemedicine API', version: 'v1' } })

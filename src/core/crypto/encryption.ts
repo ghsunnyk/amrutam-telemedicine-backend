@@ -153,4 +153,13 @@ export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB)
 }
 
+export function signBlob(data: Buffer): Buffer {
+  return createHmac('sha256', env.ENCRYPTION_KEK).update(data).digest()
+}
+
+export function verifyBlobSignature(data: Buffer, signature: Buffer): boolean {
+  const expected = signBlob(data)
+  return expected.length === signature.length && timingSafeEqual(expected, signature)
+}
+
 const normalise = (v: string): string => v.trim().toLowerCase().normalize('NFKC')
