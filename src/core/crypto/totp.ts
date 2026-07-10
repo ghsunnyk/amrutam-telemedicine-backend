@@ -1,25 +1,13 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 
-/**
- * RFC 6238 TOTP over RFC 4648 base32, HMAC-SHA1, 6 digits, 30s step.
- *
- * SHA-1 here is not a weakness: HMAC-SHA1 has no practical break, and every
- * authenticator app (Google, Authy, 1Password, Aegis) speaks exactly this. Choosing
- * SHA-256 would be marginally "stronger" and would silently fail for most users.
- *
- * Implemented directly rather than pulled from npm — it is ~60 lines of node:crypto,
- * and an auth primitive is a poor place to inherit somebody else's supply chain.
- */
-
 const DIGITS = 6
 const STEP_SECONDS = 30
-const SECRET_BYTES = 20 // 160 bits, the RFC 4226 recommendation for HMAC-SHA1
+const SECRET_BYTES = 20
 
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
 
 export const generateSecret = (): string => base32Encode(randomBytes(SECRET_BYTES))
 
-/** The step number a timestamp falls in. Persist it to block same-step replay. */
 export const currentStep = (atMs: number = Date.now()): number =>
   Math.floor(atMs / 1000 / STEP_SECONDS)
 
@@ -31,7 +19,6 @@ export function generateToken(secret: string, step: number = currentStep()): str
 
   const digest = createHmac('sha1', key).update(counter).digest()
 
-  // Dynamic truncation, RFC 4226 §5.3.
   const offset = digest[digest.length - 1]! & 0x0f
   const binary =
     ((digest[offset]! & 0x7f) << 24) |
@@ -44,16 +31,9 @@ export function generateToken(secret: string, step: number = currentStep()): str
 
 export interface VerifyResult {
   valid: boolean
-  /** The step the code matched. Store it; reject any later code with step <= this. */
   step?: number
 }
 
-/**
- * @param window Steps of clock skew tolerated on each side. 1 → ±30s.
- * @param lastUsedStep The step of this user's last accepted code. Codes at or before
- *   it are rejected, which closes the replay window an attacker gets by shoulder-
- *   surfing a code that is still within its 30-second validity.
- */
 export function verifyToken(
   token: string,
   secret: string,
@@ -77,8 +57,11 @@ export function verifyToken(
   return { valid: false }
 }
 
-/** The `otpauth://` URI an authenticator app scans. The secret never leaves the server otherwise. */
-export function buildOtpAuthUrl(params: { secret: string; account: string; issuer: string }): string {
+export function buildOtpAuthUrl(params: {
+  secret: string
+  account: string
+  issuer: string
+}): string {
   const label = `${encodeURIComponent(params.issuer)}:${encodeURIComponent(params.account)}`
   const query = new URLSearchParams({
     secret: params.secret,
@@ -90,7 +73,6 @@ export function buildOtpAuthUrl(params: { secret: string; account: string; issue
   return `otpauth://totp/${label}?${query.toString()}`
 }
 
-/** Single-use recovery codes, shown once at enrolment and stored only as argon2 hashes. */
 export function generateRecoveryCodes(count = 10): string[] {
   return Array.from({ length: count }, () => {
     const raw = randomBytes(5).toString('hex').toUpperCase() // 10 hex chars, 40 bits
@@ -98,7 +80,6 @@ export function generateRecoveryCodes(count = 10): string[] {
   })
 }
 
-/** Codes are always 6 ASCII digits here, so lengths match and this cannot early-exit. */
 function constantTimeEqual(a: string, b: string): boolean {
   const bufA = Buffer.from(a, 'utf8')
   const bufB = Buffer.from(b, 'utf8')
@@ -121,7 +102,7 @@ function base32Encode(buffer: Buffer): string {
   }
   if (bits > 0) output += BASE32_ALPHABET[(value << (5 - bits)) & 31]
 
-  return output // unpadded; authenticator apps accept it and '=' confuses some
+  return output
 }
 
 function base32Decode(input: string): Buffer {

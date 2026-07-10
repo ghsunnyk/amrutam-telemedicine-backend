@@ -1,15 +1,3 @@
-// Amrutam Telemedicine — data model
-//
-// Conventions
-//  - snake_case in the database, camelCase in the client (@map / @@map everywhere).
-//  - UUIDv7-ish ids generated in the DB (gen_random_uuid) so writes never round-trip for an id.
-//  - Sensitive columns are suffixed `Enc` and hold an AES-256-GCM envelope produced by
-//    src/core/crypto/encryption.ts. Anything we must look up by is paired with a `*Hash`
-//    blind index (HMAC-SHA256 under a separate pepper) so equality search survives encryption.
-//  - Every mutable clinical/financial row carries `version` for optimistic concurrency.
-//
-// See docs/architecture.md §Data Model and docs/security.md §Data Classification.
-
 generator client {
   provider     = "prisma-client"
   output       = "../src/generated/prisma"
@@ -17,15 +5,10 @@ generator client {
   runtime      = "nodejs"
 }
 
-// Prisma 7: connection URLs live in prisma.config.ts (migrations) and are passed to
-// PrismaClient via the `pg` driver adapter at runtime — see src/db/prisma.ts.
 datasource db {
   provider = "postgresql"
 }
 
-// ---------------------------------------------------------------------------
-// Enums
-// ---------------------------------------------------------------------------
 
 enum Role {
   PATIENT
@@ -163,15 +146,10 @@ enum SagaStatus {
   @@map("saga_status")
 }
 
-// ---------------------------------------------------------------------------
-// Identity & access
-// ---------------------------------------------------------------------------
-
 model User {
   id    String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email String @unique @db.Citext
 
-  // Argon2id. Null only for future SSO-only accounts.
   passwordHash String? @map("password_hash")
 
   role   Role
@@ -179,18 +157,14 @@ model User {
 
   emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(3)
 
-  // MFA (TOTP). Secret is envelope-encrypted; never leaves the service layer.
   mfaEnabled      Boolean   @default(false) @map("mfa_enabled")
   mfaSecretEnc    Bytes?    @map("mfa_secret_enc")
   mfaEnrolledAt   DateTime? @map("mfa_enrolled_at") @db.Timestamptz(3)
   mfaLastUsedStep BigInt?   @map("mfa_last_used_step") // TOTP replay guard
 
-  // Credential-stuffing / brute-force controls.
   failedLoginCount Int       @default(0) @map("failed_login_count")
   lockedUntil      DateTime? @map("locked_until") @db.Timestamptz(3)
 
-  // Invalidate every access token issued before this instant (logout-all, role change,
-  // password reset). Checked on each request against the JWT `iat`.
   tokensValidFrom DateTime @default(now()) @map("tokens_valid_from") @db.Timestamptz(3)
 
   createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -218,7 +192,6 @@ model Profile {
   firstName String @map("first_name")
   lastName  String @map("last_name")
 
-  // Blind index enables "find by phone" without decrypting the table.
   phoneHash String? @unique @map("phone_hash")
   phoneEnc  Bytes?  @map("phone_enc")
 
@@ -238,9 +211,6 @@ model Profile {
   @@map("profiles")
 }
 
-/// Refresh tokens are opaque, single-use and rotated. `familyId` groups a login
-/// session's rotation chain: presenting an already-rotated token means the token
-/// leaked, so we revoke the entire family. Only the SHA-256 of the token is stored.
 model RefreshToken {
   id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId    String @map("user_id") @db.Uuid
@@ -249,9 +219,7 @@ model RefreshToken {
 
   expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
   revokedAt DateTime? @map("revoked_at") @db.Timestamptz(3)
-  /// Set when this token is exchanged; presence means "already used".
   rotatedAt DateTime? @map("rotated_at") @db.Timestamptz(3)
-  /// Why it died — useful in incident review.
   revokedReason String? @map("revoked_reason")
 
   userAgent String? @map("user_agent")
@@ -270,7 +238,6 @@ model RefreshToken {
 model MfaRecoveryCode {
   id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId String @map("user_id") @db.Uuid
-  /// Argon2id hash of a single-use recovery code.
   codeHash String    @map("code_hash")
   usedAt   DateTime? @map("used_at") @db.Timestamptz(3)
 
@@ -282,8 +249,6 @@ model MfaRecoveryCode {
   @@map("mfa_recovery_codes")
 }
 
-/// Single-use, short-lived tokens for email verification and password reset.
-/// Only the hash is persisted.
 model VerificationToken {
   id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId    String @map("user_id") @db.Uuid
@@ -301,15 +266,10 @@ model VerificationToken {
   @@map("verification_tokens")
 }
 
-// ---------------------------------------------------------------------------
-// Doctors, specializations, availability
-// ---------------------------------------------------------------------------
-
 model Doctor {
   id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId String @unique @map("user_id") @db.Uuid
 
-  /// Medical council registration. Encrypted + blind-indexed for uniqueness checks.
   registrationNumberHash String @unique @map("registration_number_hash")
   registrationNumberEnc  Bytes  @map("registration_number_enc")
   registrationCouncil    String @map("registration_council")
@@ -328,17 +288,13 @@ model Doctor {
   state              String?
   country            String   @default("IN")
 
-  /// Money is integer minor units (paise). Never float.
   consultationFeeMinor Int    @map("consultation_fee_minor")
   currency             String @default("INR") @db.Char(3)
 
-  /// Denormalised rating aggregates, refreshed by a job. Reads never aggregate on the fly.
   ratingAvg   Decimal @default(0) @map("rating_avg") @db.Decimal(3, 2)
   ratingCount Int     @default(0) @map("rating_count")
 
-  /// Minutes a patient may hold a slot before checkout expires.
   slotHoldMinutes Int @default(10) @map("slot_hold_minutes")
-  /// Default length of a generated slot.
   slotDurationMinutes Int @default(30) @map("slot_duration_minutes")
 
   isAcceptingPatients Boolean @default(true) @map("is_accepting_patients")
@@ -383,16 +339,11 @@ model DoctorSpecialization {
   @@map("doctor_specializations")
 }
 
-/// Recurring weekly template. Slots are materialised from these rules into
-/// `availability_slots` for a rolling horizon by a background job, so the read
-/// path (slot search) is a plain indexed range scan.
 model AvailabilityRule {
   id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   doctorId String @map("doctor_id") @db.Uuid
 
-  /// 0 = Sunday … 6 = Saturday, in `timezone`.
   weekday Int
-  /// Minutes from local midnight. 540 = 09:00.
   startMinute Int    @map("start_minute")
   endMinute   Int    @map("end_minute")
   timezone    String @default("Asia/Kolkata")
@@ -412,9 +363,6 @@ model AvailabilityRule {
   @@map("availability_rules")
 }
 
-/// Materialised bookable slot. This is the contention hot spot: booking takes a
-/// row lock (`SELECT … FOR UPDATE`) and flips AVAILABLE → HELD → BOOKED.
-/// `version` additionally guards optimistic paths.
 model AvailabilitySlot {
   id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   doctorId String @map("doctor_id") @db.Uuid
@@ -424,14 +372,10 @@ model AvailabilitySlot {
 
   status SlotStatus @default(AVAILABLE)
 
-  /// Set while status = HELD. The hold expires at `holdExpiresAt`; a sweeper job
-  /// (and an opportunistic check on read) releases stale holds.
   heldByUserId  String?   @map("held_by_user_id") @db.Uuid
   holdExpiresAt DateTime? @map("hold_expires_at") @db.Timestamptz(3)
-  /// Ties the hold to the checkout attempt that created it.
   holdToken String? @map("hold_token") @db.Uuid
 
-  /// Generated from an AvailabilityRule; null if the doctor added it ad hoc.
   sourceRuleId String? @map("source_rule_id") @db.Uuid
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -441,25 +385,16 @@ model AvailabilitySlot {
   doctor       Doctor        @relation(fields: [doctorId], references: [id], onDelete: Cascade)
   consultation Consultation?
 
-  /// A doctor cannot have two slots starting at the same instant.
   @@unique([doctorId, startAt])
-  /// The slot-search read path: "available slots for doctor X in window [a,b)".
   @@index([doctorId, status, startAt])
-  /// The sweeper path: "holds that expired before now".
   @@index([status, holdExpiresAt])
-  /// Cross-doctor search by time window (e.g. "any cardiologist tomorrow 5pm").
   @@index([startAt, status])
   @@map("availability_slots")
 }
 
-// ---------------------------------------------------------------------------
-// Consultations, prescriptions, payments
-// ---------------------------------------------------------------------------
-
 model Consultation {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
-  /// Human-facing reference, e.g. AMR-2K5F8H3Q. Safe to put in emails/support tickets.
   reference String @unique
 
   patientId String @map("patient_id") @db.Uuid
@@ -474,11 +409,9 @@ model Consultation {
   startedAt      DateTime? @map("started_at") @db.Timestamptz(3)
   endedAt        DateTime? @map("ended_at") @db.Timestamptz(3)
 
-  /// Price is captured at booking time; the doctor may change their fee later.
   feeMinor Int    @map("fee_minor")
   currency String @default("INR") @db.Char(3)
 
-  /// PHI — encrypted at rest, decrypted only for the treating doctor and the patient.
   chiefComplaintEnc Bytes? @map("chief_complaint_enc")
   symptomsEnc       Bytes? @map("symptoms_enc")
   diagnosisEnc      Bytes? @map("diagnosis_enc")
@@ -489,7 +422,6 @@ model Consultation {
   cancelledBy     CancelledBy? @map("cancelled_by")
   cancelledReason String?      @map("cancelled_reason")
 
-  /// Set when the booking saga expires an unpaid consultation.
   expiresAt DateTime? @map("expires_at") @db.Timestamptz(3)
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -503,10 +435,8 @@ model Consultation {
   payments     Payment[]
   review       Review?
 
-  /// "My upcoming consultations", newest first.
   @@index([patientId, status, scheduledStart(sort: Desc)])
   @@index([doctorId, status, scheduledStart(sort: Desc)])
-  /// Admin analytics + partition-pruning candidate (see docs/architecture.md).
   @@index([scheduledStart])
   @@index([status, expiresAt])
   @@map("consultations")
@@ -519,13 +449,9 @@ model Prescription {
 
   status PrescriptionStatus @default(DRAFT)
 
-  /// Encrypted JSON array of line items:
-  /// [{ drug, strength, form, dosage, frequency, durationDays, instructions }]
   itemsEnc   Bytes  @map("items_enc")
   adviceEnc  Bytes? @map("advice_enc")
 
-  /// Detached signature over the canonical prescription payload (Ed25519).
-  /// Lets a pharmacy verify authenticity without trusting our API.
   signature      Bytes?  @map("signature")
   signatureKeyId String? @map("signature_key_id")
 
@@ -558,13 +484,11 @@ model Payment {
   currency            String @default("INR") @db.Char(3)
   refundedAmountMinor Int    @default(0) @map("refunded_amount_minor")
 
-  /// Provider's order/intent id. Unique per provider so webhook replays are no-ops.
   providerOrderId   String? @map("provider_order_id")
   providerPaymentId String? @map("provider_payment_id")
   failureCode       String? @map("failure_code")
   failureMessage    String? @map("failure_message")
 
-  /// The client-supplied Idempotency-Key that created this payment.
   idempotencyKey String? @map("idempotency_key")
 
   authorizedAt DateTime? @map("authorized_at") @db.Timestamptz(3)
@@ -600,34 +524,22 @@ model Review {
   @@map("reviews")
 }
 
-// ---------------------------------------------------------------------------
-// Compliance: audit trail
-// ---------------------------------------------------------------------------
-
-/// Append-only. Partitioned monthly by `created_at` (see the initial migration);
-/// old partitions are detached to cold storage rather than DELETEd.
-/// The composite primary key exists because Postgres requires the partition key
-/// to be part of every unique constraint.
 model AuditLog {
   id        String   @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  /// Null for anonymous/system actions (failed login on an unknown email, cron jobs).
   actorId   String? @map("actor_id") @db.Uuid
   actorRole Role?   @map("actor_role")
 
-  /// e.g. "consultation.booked", "auth.login.failed", "prescription.issued"
   action       String
   resourceType String  @map("resource_type")
   resourceId   String? @map("resource_id")
 
-  /// Redacted diff. Never contains PHI or credentials — see AuditService.
   metadata Json?
 
   ipHash    String? @map("ip_hash")
   userAgent String? @map("user_agent")
   requestId String? @map("request_id")
-  /// Correlates an audit entry with its distributed trace.
   traceId String? @map("trace_id")
 
   outcome String @default("SUCCESS") // SUCCESS | FAILURE | DENIED
@@ -641,20 +553,12 @@ model AuditLog {
   @@map("audit_logs")
 }
 
-// ---------------------------------------------------------------------------
-// Platform: encryption keys, idempotency, rate limiting, jobs, outbox, sagas
-// ---------------------------------------------------------------------------
-
-/// Envelope encryption. The DEK is stored wrapped by a KEK that lives outside the
-/// database (env var in dev, KMS/Vault in prod). Rotating the KEK rewraps rows here;
-/// rotating a DEK marks it RETIRED and a background job re-encrypts referencing rows.
 model EncryptionKey {
   id      String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   version Int    @unique
 
   wrappedDek Bytes  @map("wrapped_dek")
   algorithm  String @default("aes-256-gcm")
-  /// Which KEK wrapped this DEK, so we can rotate KEKs independently.
   kekId String @map("kek_id")
 
   status EncryptionKeyStatus @default(ACTIVE)
@@ -667,18 +571,12 @@ model EncryptionKey {
   @@map("encryption_keys")
 }
 
-/// Makes non-GET writes replay-safe. The first request inserts a row IN_PROGRESS
-/// (a unique-violation is what serialises concurrent duplicates); the response is
-/// then recorded and replayed verbatim to retries carrying the same key.
 model IdempotencyKey {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
-  /// Namespaced by caller so one user can't hijack another's key.
   scope String
   key   String
 
-  /// SHA-256 of method + path + body. A same-key-different-body retry is a 422,
-  /// not a silent replay of the wrong response.
   requestHash String @map("request_hash")
 
   status IdempotencyStatus @default(IN_PROGRESS)
@@ -686,7 +584,6 @@ model IdempotencyKey {
   responseStatus Int?  @map("response_status")
   responseBody   Json? @map("response_body")
 
-  /// Fencing token: whoever holds it is executing. Lets us detect crashed holders.
   lockedAt DateTime  @default(now()) @map("locked_at") @db.Timestamptz(3)
   lockedBy String?   @map("locked_by")
 
@@ -699,11 +596,7 @@ model IdempotencyKey {
   @@map("idempotency_keys")
 }
 
-/// Postgres-backed token bucket (no Redis by design — see docs/architecture.md
-/// §Why no Redis). Refill is computed in SQL inside a single UPSERT, so the
-/// check-and-consume is atomic without an application-side lock.
 model RateLimitBucket {
-  /// "<policy>:<identity>", e.g. "auth.login:ip:3f2a…"
   id String @id
 
   tokens         Float
@@ -714,8 +607,6 @@ model RateLimitBucket {
   @@map("rate_limit_buckets")
 }
 
-/// Durable job queue. Workers claim rows with `FOR UPDATE SKIP LOCKED`, which gives
-/// us competing consumers without a broker. Retries use exponential backoff + jitter.
 model Job {
   id    String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   queue String @default("default")
@@ -727,32 +618,25 @@ model Job {
   attempts    Int       @default(0)
   maxAttempts Int       @default(5) @map("max_attempts")
 
-  /// Next eligible execution time; backoff pushes this forward.
   runAt DateTime @default(now()) @map("run_at") @db.Timestamptz(3)
 
   lockedAt   DateTime? @map("locked_at") @db.Timestamptz(3)
   lockedBy   String?   @map("locked_by")
-  /// Lease expiry — a worker that dies mid-job has its row reclaimed after this.
   leaseUntil DateTime? @map("lease_until") @db.Timestamptz(3)
 
   lastError   String?   @map("last_error")
   completedAt DateTime? @map("completed_at") @db.Timestamptz(3)
 
-  /// Collapses duplicate enqueues (e.g. "send reminder for consultation X").
   dedupeKey String? @unique @map("dedupe_key")
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  /// The claim query: pending jobs whose time has come, oldest first.
   @@index([queue, status, runAt])
   @@index([status, leaseUntil])
   @@map("jobs")
 }
 
-/// Transactional outbox. Domain events are written in the *same* transaction as the
-/// state change, then relayed asynchronously — so we never lose an event to a crash
-/// between "commit" and "publish".
 model OutboxEvent {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
@@ -776,18 +660,14 @@ model OutboxEvent {
   @@map("outbox_events")
 }
 
-/// Orchestration state for the booking saga (hold → charge → confirm), so a crashed
-/// coordinator can resume and, on failure, run compensations in reverse order.
 model SagaInstance {
   id   String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   type String
 
-  /// The business entity this saga drives (e.g. a consultation id).
   correlationId String @map("correlation_id")
 
   status      SagaStatus @default(RUNNING)
   currentStep String     @map("current_step")
-  /// Steps completed so far, in order — the compensation stack.
   completedSteps String[] @default([]) @map("completed_steps")
 
   context Json

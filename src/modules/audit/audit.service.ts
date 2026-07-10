@@ -153,6 +153,7 @@ export const AuditAction = {
   DOCTOR_REJECTED: 'doctor.rejected',
   AVAILABILITY_RULE_CREATED: 'doctor.availability.rule_created',
   AVAILABILITY_RULE_DELETED: 'doctor.availability.rule_deleted',
+  DOCTOR_APPLICATION_SUBMITTED: 'doctor.application.submitted',
 
   // booking
   SLOT_HELD: 'booking.slot.held',
