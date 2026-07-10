@@ -1,7 +1,11 @@
 import type { Request, Response } from 'express'
 import { UnauthenticatedError } from '../../core/errors'
 import { sendSuccess } from '../../core/http'
-import type { BookConsultationInput } from './consultation.schemas'
+import type {
+  BookConsultationInput,
+  CancelConsultationInput,
+  CompleteConsultationInput,
+} from './consultation.schemas'
 import type { ConsultationService } from './consultation.service'
 
 export class ConsultationController {
@@ -23,6 +27,32 @@ export class ConsultationController {
       getConsultationId(req)
     )
     sendSuccess(res, consultation)
+  }
+
+  start = async (req: Request, res: Response): Promise<void> => {
+    await this.consultations.start(requireAuth(req).userId, getConsultationId(req))
+    res.status(204).end()
+  }
+
+  complete = async (req: Request, res: Response): Promise<void> => {
+    await this.consultations.complete(
+      requireAuth(req).userId,
+      getConsultationId(req),
+      req.body as CompleteConsultationInput
+    )
+    res.status(204).end()
+  }
+
+  cancel = async (req: Request, res: Response): Promise<void> => {
+    const auth = requireAuth(req)
+    const { reason } = req.body as CancelConsultationInput
+    await this.consultations.cancel(auth.userId, auth.role, getConsultationId(req), reason)
+    res.status(204).end()
+  }
+
+  markNoShow = async (req: Request, res: Response): Promise<void> => {
+    await this.consultations.markNoShow(requireAuth(req).userId, getConsultationId(req))
+    res.status(204).end()
   }
 }
 

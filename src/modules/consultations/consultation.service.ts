@@ -2,13 +2,15 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { fieldAad, type Keyring } from '../../core/crypto/keyring'
 import { ConflictError, ForbiddenError, NotFoundError } from '../../core/errors'
 import type { Db } from '../../db/prisma'
+import type { Role } from '../../generated/prisma/enums'
 import {
   bookingAttemptsTotal,
   bookingSlotContentionTotal,
   consultationsTotal,
 } from '../../observability/metrics'
 import { AuditAction, type AuditService } from '../audit/audit.service'
-import type { BookConsultationInput } from './consultation.schemas'
+import type { PaymentService } from '../payments/payment.service'
+import type { BookConsultationInput, CompleteConsultationInput } from './consultation.schemas'
 
 export interface BookedConsultation {
   id: string
@@ -29,7 +31,8 @@ export class ConsultationService {
   constructor(
     private readonly db: Db,
     private readonly keyring: Keyring,
-    private readonly audit: AuditService
+    private readonly audit: AuditService,
+    private readonly payments: PaymentService
   ) {}
 
   async book(patientId: string, input: BookConsultationInput): Promise<BookedConsultation> {
@@ -161,6 +164,161 @@ export class ConsultationService {
       consultation.patientId === userId || consultation.doctor.userId === userId || role === 'ADMIN'
     if (!isOwner) throw new ForbiddenError('You do not have access to this consultation')
 
+    return consultation
+  }
+
+  async start(doctorUserId: string, consultationId: string): Promise<void> {
+    const consultation = await this.loadForDoctor(doctorUserId, consultationId)
+    if (consultation.status !== 'SCHEDULED') {
+      throw new ConflictError('Consultation must be SCHEDULED to start')
+    }
+    await this.db.$transaction(async tx => {
+      await tx.consultation.update({
+        where: { id: consultationId },
+        data: { status: 'IN_PROGRESS', startedAt: new Date() },
+      })
+      await this.audit.record(tx, {
+        action: AuditAction.CONSULTATION_STARTED,
+        resourceType: 'consultation',
+        resourceId: consultationId,
+        actorId: doctorUserId,
+        actorRole: 'DOCTOR',
+      })
+    })
+    consultationsTotal.inc({ status: 'IN_PROGRESS' })
+  }
+
+  async complete(
+    doctorUserId: string,
+    consultationId: string,
+    input: CompleteConsultationInput
+  ): Promise<void> {
+    const consultation = await this.loadForDoctor(doctorUserId, consultationId)
+    if (consultation.status !== 'IN_PROGRESS') {
+      throw new ConflictError('Consultation must be IN_PROGRESS to complete')
+    }
+    await this.db.$transaction(async tx => {
+      await tx.consultation.update({
+        where: { id: consultationId },
+        data: {
+          status: 'COMPLETED',
+          endedAt: new Date(),
+          diagnosisEnc: input.diagnosis
+            ? this.keyring.encryptField(
+                input.diagnosis,
+                fieldAad('consultation', consultationId, 'diagnosis')
+              )
+            : undefined,
+          doctorNotesEnc: input.doctorNotes
+            ? this.keyring.encryptField(
+                input.doctorNotes,
+                fieldAad('consultation', consultationId, 'doctor_notes')
+              )
+            : undefined,
+          followUpNotesEnc: input.followUpNotes
+            ? this.keyring.encryptField(
+                input.followUpNotes,
+                fieldAad('consultation', consultationId, 'follow_up_notes')
+              )
+            : undefined,
+        },
+      })
+      await this.audit.record(tx, {
+        action: AuditAction.CONSULTATION_COMPLETED,
+        resourceType: 'consultation',
+        resourceId: consultationId,
+        actorId: doctorUserId,
+        actorRole: 'DOCTOR',
+      })
+    })
+    consultationsTotal.inc({ status: 'COMPLETED' })
+  }
+
+  async cancel(userId: string, role: Role, consultationId: string, reason: string): Promise<void> {
+    const consultation = await this.db.consultation.findUnique({
+      where: { id: consultationId },
+      include: { doctor: { select: { userId: true } }, payments: true },
+    })
+    if (!consultation) throw new NotFoundError('Consultation', consultationId)
+    const isPatient = consultation.patientId === userId
+    const isDoctor = consultation.doctor.userId === userId
+    if (!isPatient && !isDoctor && role !== 'ADMIN') {
+      throw new ForbiddenError('You do not have access to this consultation')
+    }
+    if (!['PENDING_PAYMENT', 'SCHEDULED'].includes(consultation.status)) {
+      throw new ConflictError('Consultation can no longer be cancelled')
+    }
+    const cancelledBy = role === 'ADMIN' ? 'ADMIN' : isDoctor ? 'DOCTOR' : 'PATIENT'
+    const capturedPayment = consultation.payments.find(p => p.status === 'CAPTURED')
+
+    await this.db.$transaction(async tx => {
+      await tx.consultation.update({
+        where: { id: consultationId },
+        data: {
+          status: 'CANCELLED',
+          cancelledAt: new Date(),
+          cancelledBy,
+          cancelledReason: reason,
+        },
+      })
+      await tx.availabilitySlot.updateMany({
+        where: { id: consultation.slotId, status: 'BOOKED' },
+        data: { status: 'AVAILABLE', heldByUserId: null, holdExpiresAt: null, holdToken: null },
+      })
+      await tx.payment.updateMany({
+        where: { consultationId, status: { in: ['PENDING', 'AUTHORIZED'] } },
+        data: { status: 'FAILED', failureCode: 'CONSULTATION_CANCELLED' },
+      })
+      await this.audit.record(tx, {
+        action: AuditAction.CONSULTATION_CANCELLED,
+        resourceType: 'consultation',
+        resourceId: consultationId,
+        actorId: userId,
+        actorRole: role,
+        metadata: { reason, cancelledBy },
+      })
+    })
+
+    if (capturedPayment) {
+      await this.payments.refund(userId, consultationId, `consultation_cancelled: ${reason}`)
+    }
+    consultationsTotal.inc({ status: 'CANCELLED' })
+  }
+
+  async markNoShow(doctorUserId: string, consultationId: string): Promise<void> {
+    const consultation = await this.loadForDoctor(doctorUserId, consultationId)
+    if (consultation.status !== 'SCHEDULED') {
+      throw new ConflictError('Consultation must be SCHEDULED to mark as no-show')
+    }
+    if (consultation.scheduledStart > new Date()) {
+      throw new ConflictError('Cannot mark no-show before the scheduled start time')
+    }
+    await this.db.$transaction(async tx => {
+      await tx.consultation.update({
+        where: { id: consultationId },
+        data: { status: 'NO_SHOW', cancelledAt: new Date(), cancelledBy: 'SYSTEM' },
+      })
+      await this.audit.record(tx, {
+        action: AuditAction.CONSULTATION_CANCELLED,
+        resourceType: 'consultation',
+        resourceId: consultationId,
+        actorId: doctorUserId,
+        actorRole: 'DOCTOR',
+        metadata: { reason: 'no_show' },
+      })
+    })
+    consultationsTotal.inc({ status: 'NO_SHOW' })
+  }
+
+  private async loadForDoctor(doctorUserId: string, consultationId: string) {
+    const consultation = await this.db.consultation.findUnique({
+      where: { id: consultationId },
+      include: { doctor: { select: { userId: true } } },
+    })
+    if (!consultation) throw new NotFoundError('Consultation', consultationId)
+    if (consultation.doctor.userId !== doctorUserId) {
+      throw new ForbiddenError('You do not have access to this consultation')
+    }
     return consultation
   }
 }

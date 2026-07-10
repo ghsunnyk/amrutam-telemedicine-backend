@@ -19,3 +19,13 @@ export const cancelConsultationSchema = z
   .strict()
 
 export type CancelConsultationInput = z.infer<typeof cancelConsultationSchema>
+
+export const completeConsultationSchema = z
+  .object({
+    diagnosis: z.string().trim().min(1).max(4000).optional(),
+    doctorNotes: z.string().trim().min(1).max(4000).optional(),
+    followUpNotes: z.string().trim().min(1).max(2000).optional(),
+  })
+  .strict()
+
+export type CompleteConsultationInput = z.infer<typeof completeConsultationSchema>
