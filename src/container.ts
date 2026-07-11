@@ -1,5 +1,4 @@
 import type { Pool } from 'pg'
-import { env } from './config/env'
 import { Keyring } from './core/crypto/keyring'
 import { initPasswordHasher } from './core/crypto/password'
 import { createPool, createPrismaClient, observePool, type Db } from './db/prisma'
@@ -21,8 +20,8 @@ import { PaymentService } from './modules/payments/payment.service'
 import { PrescriptionController } from './modules/prescriptions/prescription.controller'
 import { PrescriptionService } from './modules/prescriptions/prescription.service'
 import { createLogger } from './observability/logger'
-import { createWorker, reschedule, scheduleRecurringJobs } from './workers'
-import type { JobQueue } from './workers/jobQueue'
+// import { createWorker, reschedule, scheduleRecurringJobs } from './workers'
+// import type { JobQueue } from './workers/jobQueue'
 
 const log = createLogger('container')
 
@@ -47,7 +46,7 @@ export interface Container {
   prescriptionController: PrescriptionController
   analytics: AnalyticsService
   analyticsController: AnalyticsController
-  worker: JobQueue | null
+  // worker: JobQueue | null
   shutdown: () => Promise<void>
 }
 
@@ -76,9 +75,9 @@ export async function createContainer(options: ContainerOptions = {}): Promise<C
   const availability = new AvailabilityService(db, audit)
   const availabilityController = new AvailabilityController(availability)
 
-  const worker = env.WORKER_ENABLED ? createWorker(db) : null
+  // const worker = env.WORKER_ENABLED ? createWorker(db) : null
 
-  const payments = new PaymentService(db, audit, worker)
+  const payments = new PaymentService(db, audit, null)
   const paymentController = new PaymentController(payments)
 
   const consultations = new ConsultationService(db, keyring, audit, payments)
@@ -90,14 +89,14 @@ export async function createContainer(options: ContainerOptions = {}): Promise<C
   const analytics = new AnalyticsService(db)
   const analyticsController = new AnalyticsController(analytics)
 
-  if (worker) {
-    worker.start()
-    await scheduleRecurringJobs(worker)
-    await reschedule(worker)
-  }
+  // if (worker) {
+  //   worker.start()
+  //   await scheduleRecurringJobs(worker)
+  //   await reschedule(worker)
+  // }
 
   const shutdown = async (): Promise<void> => {
-    if (worker) await worker.stop()
+    // if (worker) await worker.stop()
     stopPoolObserver()
     await db.$disconnect()
     await pool.end()
@@ -125,7 +124,7 @@ export async function createContainer(options: ContainerOptions = {}): Promise<C
     prescriptionController,
     analytics,
     analyticsController,
-    worker,
+    // worker,
     shutdown,
   }
 }

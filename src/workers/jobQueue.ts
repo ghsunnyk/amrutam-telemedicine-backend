@@ -122,7 +122,7 @@ export class JobQueue {
 
   private async run(
     job: { id: string; type: string; payload: unknown; attempts: number },
-    workerId: string
+    _workerId: string
   ): Promise<void> {
     const handler = this.handlers.get(job.type)
     if (!handler) {
